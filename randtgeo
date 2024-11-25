@@ -1,0 +1,710 @@
+function TreeTrackerV2()
+    %% Main Function: Point Cloud Comparison and Visualization
+
+    % Ensure figures are visible
+    set(0, 'DefaultFigureVisible', 'on');
+
+    % Prompt the user to choose between processing new data or loading existing data
+    choice = questdlg('Do you want to process new point cloud data or load existing data?', ...
+                     'Data Selection', ...
+                     'Process New Data', 'Load Existing Data', 'Process New Data');
+
+    if strcmp(choice, 'Load Existing Data')
+        % Load the saved data
+        outputData = loadPointCloudData();  % Nested function
+        if isempty(outputData)
+            disp('No data loaded. Exiting function.');
+            return;
+        end
+        % Assign loaded data to variables for compatibility with the rest of the function
+        ptCloud_t1 = outputData.ptCloud_t1;
+        ptCloud_t2 = outputData.ptCloud_t2;
+        labels_t1 = outputData.labels_t1;
+        labels_t2 = outputData.labels_t2;
+        centroids_t1 = outputData.centroids_t1;
+        centroids_t2 = outputData.centroids_t2;
+        matches = outputData.matches;
+        distances = outputData.distances;
+        heights_t1 = outputData.heights_t1;
+        heights_t2 = outputData.heights_t2;
+        threshold = outputData.threshold;
+        radius = outputData.radius;
+        minDistance = outputData.minDistance;
+        minHeight = outputData.minHeight;
+        maxHeight = outputData.maxHeight;
+        maxMatchingDistance = outputData.maxMatchingDistance;
+        utmZone = outputData.utmZone;
+        % Continue with visualization or analysis as needed
+        disp('Loaded data is ready for visualization and analysis.');
+
+        % Proceed to plotting
+        plotSegmentedPointCloudWithDisplacement(ptCloud_t1, labels_t1, centroids_t1, centroids_t2, matches, ptCloud_t2, 'Segmented Point Cloud t1 and t2 with Displacement');
+        plotMatchedClusters(centroids_t1, centroids_t2, matches, distances, heights_t1, heights_t2);
+        plotCentroidsOnMapWithDisplacement(centroids_t1, centroids_t2, matches, distances, utmZone, 'Centroids of Point Clouds on Map with Displacement');
+
+        % **NEW: Display Results Table with Coordinates**
+        displayResultsTable(centroids_t1, centroids_t2, distances(:,1), distances(:,2), distances(:,3), distances(:,4));
+
+        % **NEW: Plot Distance Distribution**
+        plotDistanceDistribution(distances(:,4));
+
+    else
+        %% Processing New Data
+
+        % Importing and Segmenting Point Clouds from CSV
+        try
+            [file1, path1] = uigetfile('*.csv', 'Select the first point cloud CSV file');
+            [file2, path2] = uigetfile('*.csv', 'Select the second point cloud CSV file');
+
+            if isequal(file1, 0) || isequal(file2, 0)
+                error('File selection canceled.');
+            end
+
+            disp('Loading point cloud data...');
+            data_t1 = readmatrix(fullfile(path1, file1));
+            data_t2 = readmatrix(fullfile(path2, file2));
+
+            % Validate the data
+            if size(data_t1, 2) < 3 || size(data_t2, 2) < 3
+                error('CSV files must contain at least three columns for point cloud data (X, Y, Z).');
+            end
+
+            ptCloud_t1 = pointCloud(data_t1(:, 1:3));
+            ptCloud_t2 = pointCloud(data_t2(:, 1:3));
+            disp('Point cloud data loaded successfully.');
+        catch ME
+            disp(['Error loading point cloud data: ', ME.message]);
+            return;
+        end
+
+        %% Parameter Input
+        prompt = {'Minimum spatial distance between points for segmentation into clusters (minDistance):', ...
+                  'Minimum height for filtering clusters (minHeight):', ...
+                  'Maximum height for filtering clusters (maxHeight):', ...
+                  'Linearity threshold for classification (threshold):', ...
+                  'Search radius around each point for linearity calculation (radius):', ...
+                  'Maximum distance between cluster centroids to consider them a match between two point clouds (maxDistance):', ...
+                  'UTM Zone (positive for Northern Hemisphere, negative for Southern):'};
+        dlgtitle = 'Processing Parameters';
+        dims = [1 50];
+        definput = {'1', '2', '30', '0.9', '1', '1', '10'};  % default values
+        answer = inputdlg(prompt, dlgtitle, dims, definput);
+
+        if isempty(answer)
+            disp('Parameter input canceled. Using default values.');
+            minDistance = 1; 
+            minHeight = 2; 
+            maxHeight = 30;
+            threshold = 0.9;
+            radius = 1;
+            maxMatchingDistance = 1;
+            utmZone = 10; % Example UTM zone
+        else
+            minDistance = str2double(answer{1});
+            minHeight = str2double(answer{2});
+            maxHeight = str2double(answer{3});
+            threshold = str2double(answer{4});
+            radius = str2double(answer{5});
+            maxMatchingDistance = str2double(answer{6});
+            utmZone = str2double(answer{7});
+            
+            % **NEW: Validate Numeric Inputs**
+            if isnan(minDistance)
+                minDistance = 1;
+                warning('Invalid input for minDistance. Using default value: 1.');
+            end
+            if isnan(minHeight)
+                minHeight = 2;
+                warning('Invalid input for minHeight. Using default value: 2.');
+            end
+            if isnan(maxHeight)
+                maxHeight = 30;
+                warning('Invalid input for maxHeight. Using default value: 30.');
+            end
+            if isnan(threshold)
+                threshold = 0.9;
+                warning('Invalid input for threshold. Using default value: 0.9.');
+            end
+            if isnan(radius)
+                radius = 1;
+                warning('Invalid input for radius. Using default value: 1.');
+            end
+            if isnan(maxMatchingDistance)
+                maxMatchingDistance = 1;
+                warning('Invalid input for maxMatchingDistance. Using default value: 1.');
+            end
+            if isnan(utmZone)
+                utmZone = 10;
+                warning('Invalid input for utmZone. Using default value: 10.');
+            end
+        end
+
+        %% Segment Point Clouds
+        disp('Segmenting point clouds...');
+        try
+            [labels_t1, numClusters_t1] = pcsegdist(ptCloud_t1, minDistance);
+            [labels_t2, numClusters_t2] = pcsegdist(ptCloud_t2, minDistance);
+            disp('Segmentation completed.');
+        catch ME
+            disp(['Error during point cloud segmentation: ', ME.message]);
+            return;
+        end
+
+        %% Filter Clusters by Height
+        disp('Filtering clusters by height...');
+        labels_t1 = filterClustersByHeight(ptCloud_t1, labels_t1, numClusters_t1, minHeight, maxHeight);
+        labels_t2 = filterClustersByHeight(ptCloud_t2, labels_t2, numClusters_t2, minHeight, maxHeight);
+        disp('Height filtering completed.');
+
+        %% Plot Segmented Point Clouds with Displacement Data
+        centroids_t1 = calculateClusterCentroids(ptCloud_t1, labels_t1, numClusters_t1);
+        centroids_t2 = calculateClusterCentroids(ptCloud_t2, labels_t2, numClusters_t2);
+        matches = matchClusters(centroids_t1, centroids_t2, maxMatchingDistance);
+        plotSegmentedPointCloudWithDisplacement(ptCloud_t1, labels_t1, centroids_t1, centroids_t2, matches, ptCloud_t2, 'Segmented Point Cloud t1 and t2 with Displacement');
+
+        %% Classify Point Clouds
+        disp('Classifying point clouds...');
+        labels_class_t1 = classifyByThreshold(ptCloud_t1, threshold, radius);
+        labels_class_t2 = classifyByThreshold(ptCloud_t2, threshold, radius);
+        disp('Classification completed.');
+
+        %% Calculate Distances and Heights Between Matched Clusters
+        disp('Calculating distances and heights between matched clusters...');
+        [distances, heights_t1, heights_t2] = calculateDistancesAndHeights(ptCloud_t1, ptCloud_t2, centroids_t1, centroids_t2, labels_t1, labels_t2, matches);
+        disp('Distances and heights between matched clusters (X, Y, Z, Resultant):');
+        disp(distances);
+
+        %% Visualization of Matched Clusters and Distances
+        plotMatchedClusters(centroids_t1, centroids_t2, matches, distances, heights_t1, heights_t2);
+
+        %% Plot Centroids on Georeferenced Map with Displacement Values
+        plotCentroidsOnMapWithDisplacement(centroids_t1, centroids_t2, matches, distances, utmZone, 'Centroids of Point Clouds on Map with Displacement');
+
+        %% **NEW: Display Results Table with Coordinates**
+        displayResultsTable(centroids_t1, centroids_t2, distances(:,1), distances(:,2), distances(:,3), distances(:,4));
+
+        %% **NEW: Plot Distance Distribution**
+        plotDistanceDistribution(distances(:,4));
+
+        %% Save Output Data
+        savePrompt = questdlg('Do you want to save the output data for future use?', ...
+                             'Save Output Data', ...
+                             'Yes', 'No', 'Yes');
+        if strcmp(savePrompt, 'Yes')
+            [saveFile, savePath] = uiputfile('*.mat', 'Save Output Data As');
+            if saveFile ~= 0
+                % Organize all relevant output variables into a structure
+                outputData.ptCloud_t1 = ptCloud_t1;
+                outputData.ptCloud_t2 = ptCloud_t2;
+                outputData.labels_t1 = labels_t1;
+                outputData.labels_t2 = labels_t2;
+                outputData.centroids_t1 = centroids_t1;
+                outputData.centroids_t2 = centroids_t2;
+                outputData.matches = matches;
+                outputData.distances = distances;
+                outputData.heights_t1 = heights_t1;
+                outputData.heights_t2 = heights_t2;
+                outputData.threshold = threshold;
+                outputData.radius = radius;
+                outputData.minDistance = minDistance;
+                outputData.minHeight = minHeight;
+                outputData.maxHeight = maxHeight;
+                outputData.maxMatchingDistance = maxMatchingDistance;
+                outputData.utmZone = utmZone;
+                % Add any additional variables you deem necessary
+
+                % Save the structure to a .mat file
+                save(fullfile(savePath, saveFile), 'outputData');
+                disp(['Output data successfully saved to ', fullfile(savePath, saveFile)]);
+            else
+                disp('Save operation canceled by the user.');
+            end
+        else
+            disp('Output data not saved.');
+        end
+    end
+
+    %% ------------------ Local Helper Functions ------------------
+
+    % Function to Load Saved Data
+    function outputData = loadPointCloudData()
+        %% Load Saved Point Cloud Comparison Data
+
+        % Prompt the user to select a saved .mat file
+        [file, path] = uigetfile('*.mat', 'Select the Saved Point Cloud Data File');
+
+        if isequal(file, 0)
+            disp('File selection canceled.');
+            outputData = [];
+            return;
+        end
+
+        % Load the data
+        try
+            loadedData = load(fullfile(path, file), 'outputData');
+            if isfield(loadedData, 'outputData')
+                outputData = loadedData.outputData;
+                disp(['Data successfully loaded from ', fullfile(path, file)]);
+            else
+                error('The selected file does not contain the variable ''outputData''.');
+            end
+        catch ME
+            disp(['Error loading data: ', ME.message]);
+            outputData = [];
+        end
+    end
+
+    % Function to Classify Points by Linearity Threshold
+    function labels = classifyByThreshold(ptCloud, threshold, radius)
+        linearity = calculateLinearity(ptCloud.Location, radius);
+        labels = linearity > threshold;
+    end
+
+    % Function to Calculate Linearity of Points
+    function linearity = calculateLinearity(points, radius)
+        numPoints = size(points, 1);
+        linearity = zeros(numPoints, 1);
+
+        kdtree = KDTreeSearcher(points);
+
+        parfor i = 1:numPoints 
+            neighborsIdx = rangesearch(kdtree, points(i, :), radius);
+            neighbors = points(neighborsIdx{1}, :);
+            if size(neighbors, 1) < 3
+                linearity(i) = NaN;
+                continue;
+            end
+            covarianceMatrix = cov(neighbors);
+            eigenvalues = eig(covarianceMatrix);
+            linearity(i) = eigenvalues(1) / sum(eigenvalues);
+        end
+    end
+
+    % Function to Calculate Centroids of Clusters
+    function centroids = calculateClusterCentroids(ptCloud, labels, numClusters)
+        centroids = zeros(numClusters, 3);
+        for i = 1:numClusters
+            clusterPoints = ptCloud.Location(labels == i, :);
+            if isempty(clusterPoints)
+                centroids(i, :) = NaN;
+                continue; 
+            end
+            centroids(i, :) = mean(clusterPoints, 1);
+        end
+    end
+
+    % Function to Match Clusters Between Two Point Clouds
+    function matches = matchClusters(centroids_t1, centroids_t2, maxDistance)
+        numT1 = size(centroids_t1, 1);
+        matches = zeros(numT1, 1);
+        for i = 1:numT1
+            if any(isnan(centroids_t1(i, :)))
+                continue; 
+            end
+            distances = sqrt(sum((centroids_t2 - centroids_t1(i, :)).^2, 2));
+            [minDist, idx] = min(distances);
+            if minDist <= maxDistance
+                matches(i) = idx;
+            end
+        end
+    end
+
+    % Function to Filter Clusters by Height
+    function labels = filterClustersByHeight(ptCloud, labels, numClusters, minHeight, maxHeight)
+        for i = 1:numClusters
+            clusterPoints = ptCloud.Location(labels == i, :);
+            if isempty(clusterPoints)
+                labels(labels == i) = 0;
+                continue;
+            end
+            clusterHeight = max(clusterPoints(:, 3)) - min(clusterPoints(:, 3));
+            if clusterHeight < minHeight || clusterHeight > maxHeight
+                labels(labels == i) = 0;
+            end
+        end
+    end
+
+    % Function to Calculate Distance and Heights Between Matched Clusters
+    function [distances, heights_t1, heights_t2] = calculateDistancesAndHeights(ptCloud_t1, ptCloud_t2, centroids_t1, centroids_t2, labels_t1, labels_t2, matches)
+        numMatches = length(matches);
+        distances = zeros(numMatches, 4);
+        heights_t1 = zeros(numMatches, 1);
+        heights_t2 = zeros(numMatches, 1);
+        for i = 1:numMatches
+            if matches(i) == 0
+                continue; 
+            end
+
+            dx = centroids_t1(i, 1) - centroids_t2(matches(i), 1);
+            dy = centroids_t1(i, 2) - centroids_t2(matches(i), 2);
+            dz = centroids_t1(i, 3) - centroids_t2(matches(i), 3);
+            resultant_distance = norm([dx, dy, dz]);
+            distances(i, :) = [dx, dy, dz, resultant_distance];
+            
+            heights_t1(i) = calculateClusterHeight(ptCloud_t1, labels_t1, i);
+            heights_t2(i) = calculateClusterHeight(ptCloud_t2, labels_t2, matches(i));
+        end
+    end
+
+    % Function to Calculate Height of a Specific Cluster
+    function height = calculateClusterHeight(ptCloud, labels, clusterIdx)
+        clusterPoints = ptCloud.Location(labels == clusterIdx, :);
+        if isempty(clusterPoints)
+            height = NaN;
+            return;
+        end
+        height = max(clusterPoints(:, 3)) - min(clusterPoints(:, 3));
+    end
+
+    % Function to Plot Segmented Point Clouds with Displacement
+    function plotSegmentedPointCloudWithDisplacement(ptCloud_t1, labels_t1, centroids_t1, centroids_t2, matches, ptCloud_t2, titleText)
+        figure;  % Create a new figure window
+        hold on;
+        
+        % Validate and plot point cloud t1
+        validIdx_t1 = ~isnan(labels_t1) & labels_t1 > 0;
+        if any(validIdx_t1)
+            pcshow(ptCloud_t1.Location(validIdx_t1, :), labels_t1(validIdx_t1));
+            % Convert max label to double to avoid type mismatch
+            colormap(jet(double(max(labels_t1(validIdx_t1)))));
+            colorbar;  % Optional: Adds a colorbar to indicate cluster labels
+        else
+            disp('No valid points to display for ptCloud_t1.');
+        end
+        
+        % Validate and plot point cloud t2
+        validIdx_t2 = ~isnan(ptCloud_t2.Location(:, 1));
+        if any(validIdx_t2)
+            pcshow(ptCloud_t2.Location(validIdx_t2, :), 'r');
+        else
+            disp('No valid points to display for ptCloud_t2.');
+        end
+        
+        title(titleText);
+        xlabel('X'); ylabel('Y'); zlabel('Z');
+        
+        % Plot centroids
+        if ~isempty(centroids_t1)
+            scatter3(centroids_t1(:, 1), centroids_t1(:, 2), centroids_t1(:, 3), 100, 'bo', 'filled', 'DisplayName', 'Centroids t1');
+        end
+        if ~isempty(centroids_t2)
+            scatter3(centroids_t2(:, 1), centroids_t2(:, 2), centroids_t2(:, 3), 100, 'ro', 'filled', 'DisplayName', 'Centroids t2');
+        end
+
+        % Plot displacement arrows and annotations
+        for i = 1:length(matches)
+            if matches(i) == 0
+                continue;
+            end
+            % Calculate displacement components
+            dx = centroids_t2(matches(i), 1) - centroids_t1(i, 1);
+            dy = centroids_t2(matches(i), 2) - centroids_t1(i, 2);
+            dz = centroids_t2(matches(i), 3) - centroids_t1(i, 3);
+            resultant = norm([dx, dy, dz]);
+            
+            % Plot displacement arrow
+            quiver3(centroids_t1(i, 1), centroids_t1(i, 2), centroids_t1(i, 3), ...
+                    dx, dy, dz, 0, 'w', 'LineWidth', 1.5, 'MaxHeadSize', 1, 'DisplayName', 'Displacement Arrow');
+            
+            % Annotate the resultant displacement value
+            text(centroids_t1(i, 1), centroids_t1(i, 2), centroids_t1(i, 3), ...
+                 sprintf('R: %.2f', resultant), ...
+                 'Color', 'y', 'FontSize', 8, 'BackgroundColor', [0 0 0 0.5], 'EdgeColor', 'y', 'Margin', 2);
+        end
+        
+        hold off;
+        drawnow;  % Force immediate rendering
+    end
+
+    % Function to Plot Matched Clusters with Distances and Heights
+    function plotMatchedClusters(centroids_t1, centroids_t2, matches, distances, heights_t1, heights_t2)
+        figure;  % Create a new figure window
+        hold on;
+        grid on;
+        title('Matched Cluster Centroids, Distances, and Heights');
+        xlabel('X'); ylabel('Y'); zlabel('Z');
+        camproj('orthographic'); 
+        
+        % Plot centroids
+        scatter3(centroids_t1(:, 1), centroids_t1(:, 2), centroids_t1(:, 3), 100, 'bo', 'filled', 'DisplayName', 'Centroids t1');
+        scatter3(centroids_t2(:, 1), centroids_t2(:, 2), centroids_t2(:, 3), 100, 'ro', 'filled', 'DisplayName', 'Centroids t2');
+
+        % Plot lines between matched centroids and annotate distances and heights
+        for i = 1:length(matches)
+            if matches(i) == 0
+                continue; 
+            end
+
+            % Calculate displacement components
+            dx = centroids_t2(matches(i), 1) - centroids_t1(i, 1);
+            dy = centroids_t2(matches(i), 2) - centroids_t1(i, 2);
+            dz = centroids_t2(matches(i), 3) - centroids_t1(i, 3);
+            resultant_distance = distances(i, 4);
+            
+            % Plot displacement line
+            quiver3(centroids_t1(i, 1), centroids_t1(i, 2), centroids_t1(i, 3), ...
+                    dx, dy, dz, 0, 'k', 'LineStyle', '-', 'MaxHeadSize', 1, 'DisplayName', 'Match Lines');
+    
+            % Midpoint for displacement annotation
+            midPoint = (centroids_t1(i, :) + centroids_t2(matches(i), :)) / 2;
+
+            % Annotate the displacement and heights
+            annotationText = sprintf('X: %.2f, Y: %.2f, Z: %.2f, R: %.2f\nHeight t1: %.2f, Height t2: %.2f', ...
+                                     dx, dy, dz, resultant_distance, heights_t1(i), heights_t2(i));
+            text(midPoint(1), midPoint(2), midPoint(3), annotationText, ...
+                 'Color', 'k', 'FontSize', 8, 'BackgroundColor', [1 1 1 0.5], 'EdgeColor', 'k', 'Margin', 2);
+        end
+
+        axis equal;
+        hold off;
+        drawnow;  % Force immediate rendering
+    end
+
+    % Function to Plot Centroids on Georeferenced Map with Displacement Values
+    function plotCentroidsOnMapWithDisplacement(centroids_t1, centroids_t2, matches, distances, utmZone, titleText)
+        % Convert UTM coordinates to lat/lon
+        numCentroids_t1 = size(centroids_t1, 1);
+        latitudes_t1 = NaN(numCentroids_t1, 1);
+        longitudes_t1 = NaN(numCentroids_t1, 1);
+        latitudes_t2 = NaN(numCentroids_t1, 1);
+        longitudes_t2 = NaN(numCentroids_t1, 1);
+
+        % Loop through all centroids and convert their UTM coordinates
+        for i = 1:numCentroids_t1
+            if ~isnan(centroids_t1(i, 1)) && matches(i) > 0
+                [lat_t1, lon_t1] = utm2ll(centroids_t1(i, 1), centroids_t1(i, 2), utmZone);
+                [lat_t2, lon_t2] = utm2ll(centroids_t2(matches(i), 1), centroids_t2(matches(i), 2), utmZone);
+                latitudes_t1(i) = lat_t1;
+                longitudes_t1(i) = lon_t1;
+                latitudes_t2(i) = lat_t2;
+                longitudes_t2(i) = lon_t2;
+            end
+        end
+
+        % Plot the centroids on a map
+        figure;
+        ax = geoaxes;
+        hold(ax, 'on');
+        validIdx = ~isnan(latitudes_t1) & ~isnan(longitudes_t1) & ~isnan(latitudes_t2) & ~isnan(longitudes_t2);
+
+        % Plot centroids
+        geoplot(ax, latitudes_t1(validIdx), longitudes_t1(validIdx), 'bo', 'MarkerSize', 8, 'DisplayName', 'Centroids t1');
+        geoplot(ax, latitudes_t2(validIdx), longitudes_t2(validIdx), 'ro', 'MarkerSize', 8, 'DisplayName', 'Centroids t2');
+
+        % Plot lines between matched centroids and annotate displacements
+        textHandles = [];
+        for i = 1:numCentroids_t1
+            if validIdx(i)
+                % Plot a dashed line between matched centroids
+                geoplot(ax, [latitudes_t1(i), latitudes_t2(i)], [longitudes_t1(i), longitudes_t2(i)], 'k--', 'DisplayName', 'Match Lines');
+
+                % Calculate the midpoint between the two centroids for text placement
+                midLat = (latitudes_t1(i) + latitudes_t2(i)) / 2;
+                midLon = (longitudes_t1(i) + longitudes_t2(i)) / 2;
+
+                % Annotate the resultant displacement alongside the line
+                hText = text(ax, midLat, midLon, sprintf('R: %.2f m', distances(i, 4)), 'Color', 'r', ...
+                    'FontSize', 10, 'BackgroundColor', [1 1 1 0.6], ...
+                    'EdgeColor', 'k', 'Margin', 2, 'HorizontalAlignment', 'center');
+
+                % Store the handle
+                textHandles = [textHandles; hText];
+            end
+        end
+
+        title(ax, titleText);
+        geobasemap(ax, 'satellite');
+        hold(ax, 'off');
+
+        % Note: Removed the addlistener line as 'CameraViewAngleChanged' is not supported for 'geoaxes'.
+        % All annotations will remain visible regardless of zoom level.
+    end
+
+    % Function to Convert UTM to Latitude and Longitude
+    function [lat, lon] = utm2ll(x, y, zone)
+        % Convert UTM (x, y) coordinates to latitude and longitude using the UTM zone
+        % Uses MATLAB's Mapping Toolbox
+        try
+            crs = projcrs(utmzone2projcode(zone));
+            [lat, lon] = projinv(crs, x, y);
+        catch ME
+            error('Error converting UTM to latitude/longitude: %s', ME.message);
+        end
+    end
+
+    % Function to Get EPSG Code from UTM Zone
+    function epsg = utmzone2projcode(zone)
+        % Returns the EPSG code for a given UTM zone.
+        if zone > 0 && zone <= 60
+            epsg = 32600 + zone;  % Northern Hemisphere UTM zones (EPSG:32601 to 32660)
+        else
+            epsg = 32700 + abs(zone);  % Southern Hemisphere UTM zones (EPSG:32701 to 32760)
+        end
+    end
+
+    %% **NEW: Nested Function to Display Results Table with Coordinates**
+    function displayResultsTable(centroids_t1, centroids_t2, dx, dy, dz, R)
+        % displayResultsTable Displays a table of displacement vectors and accompanying coordinates
+        % and provides an option to save the table as a CSV file.
+        %
+        % Usage:
+        %   displayResultsTable(centroids_t1, centroids_t2, dx, dy, dz, R)
+        %
+        % Inputs:
+        %   centroids_t1 - Matrix of centroids from point cloud t1 (Nx3)
+        %   centroids_t2 - Matrix of centroids from point cloud t2 (Nx3)
+        %   dx - Displacement in X (Nx1)
+        %   dy - Displacement in Y (Nx1)
+        %   dz - Displacement in Z (Nx1)
+        %   R - Resultant displacement distance (Nx1)
+
+        % Validate Inputs
+        if nargin ~= 6
+            error('Function requires exactly six input arguments: centroids_t1, centroids_t2, dx, dy, dz, R.');
+        end
+
+        % Ensure inputs are vectors/matrices of compatible sizes
+        if size(centroids_t1, 1) ~= size(centroids_t2, 1) || ...
+           size(centroids_t1, 1) ~= length(dx) || ...
+           size(centroids_t1, 1) ~= length(dy) || ...
+           size(centroids_t1, 1) ~= length(dz) || ...
+           size(centroids_t1, 1) ~= length(R)
+            error('All input arguments must have the same number of rows.');
+        end
+
+        numPoints = size(centroids_t1, 1);
+
+        % **NEW: Filter out zero resultant distances**
+        validIdx = R ~= 0 & ~isnan(R);  % Also exclude NaN if present
+        if ~any(validIdx)
+            fig = uifigure('Name', 'Point Cloud Comparison Results', 'Position', [100 100 900 600]);
+            uialert(fig, 'No non-zero resultant distances to display.', 'No Data');
+            return;
+        end
+        centroids_t1 = centroids_t1(validIdx, :);
+        centroids_t2 = centroids_t2(validIdx, :);
+        dx = dx(validIdx);
+        dy = dy(validIdx);
+        dz = dz(validIdx);
+        R = R(validIdx);
+        numPoints = length(R);  % Update the number of points after filtering
+
+        % Create a table with the filtered data
+        T = table((1:numPoints)', ...
+                  centroids_t1(:,1), centroids_t1(:,2), centroids_t1(:,3), ...
+                  centroids_t2(:,1), centroids_t2(:,2), centroids_t2(:,3), ...
+                  dx, dy, dz, R, ...
+                  'VariableNames', {'ID', 'Centroid_t1_X_m', 'Centroid_t1_Y_m', 'Centroid_t1_Z_m', ...
+                                    'Centroid_t2_X_m', 'Centroid_t2_Y_m', 'Centroid_t2_Z_m', ...
+                                    'dx_m', 'dy_m', 'dz_m', 'Resultant_Distance_m'});
+
+        % Create a figure window
+        fig = uifigure('Name', 'Point Cloud Comparison Results', 'Position', [100 100 1000 600]);
+
+        % Create a uitable to display the data
+        uit = uitable(fig, ...
+                     'Data', T, ...
+                     'Position', [20 80 960 500], ...
+                     'ColumnName', T.Properties.VariableNames, ...
+                     'ColumnWidth', {40, 100, 100, 100, 100, 100, 100, 80, 80, 80, 120});
+
+        % Create a button to save the table as CSV
+        saveButton = uibutton(fig, ...
+                              'push', ...
+                              'Text', 'Save as CSV', ...
+                              'Position', [450 40 100 30], ...
+                              'ButtonPushedFcn', @(btn,event) saveAsCSV(T));
+
+        % Optional: Add a title or instructions
+        lbl = uilabel(fig, ...
+                     'Text', 'Comparison Results (Non-Zero Displacements):', ...
+                     'Position', [20 580 300 20], ...
+                     'FontWeight', 'bold');
+
+        % Nested function to handle saving the table as CSV
+        function saveAsCSV(tableData)
+            % Prompt user to select file location and name
+            [file, path] = uiputfile('*.csv', 'Save Results as CSV');
+            if isequal(file, 0) || isequal(path, 0)
+                % User canceled the save dialog
+                uialert(fig, 'Save operation canceled.', 'Canceled');
+                return;
+            end
+
+            % Construct full file path
+            fullFilePath = fullfile(path, file);
+
+            % Attempt to write the table to CSV
+            try
+                writetable(tableData, fullFilePath);
+                uialert(fig, ['Data successfully saved to ', fullFilePath], 'Success');
+            catch ME
+                % Handle any errors during the save process
+                uialert(fig, ['Error saving file: ', ME.message], 'Error');
+            end
+        end
+    end
+
+    %% **NEW: Nested Function to Plot Distance Distribution**
+    function plotDistanceDistribution(R)
+        % plotDistanceDistribution Plots the distribution of resultant distances (R)
+        % and marks the median, mean, and one standard deviation.
+        %
+        % Usage:
+        %   plotDistanceDistribution(R)
+        %
+        % Inputs:
+        %   R - Vector of resultant distances in meters (numeric)
+
+        % Validate Inputs
+        if nargin ~= 1
+            error('Function requires exactly one input argument: R.');
+        end
+
+        if ~isvector(R)
+            error('Input R must be a vector.');
+        end
+
+        % **NEW: Filter out zero resultant distances**
+        R = R(R ~= 0 & ~isnan(R));  % Also exclude NaN if present
+
+        if isempty(R)
+            disp('No non-zero resultant distance data to plot.');
+            return;
+        end
+
+        % Calculate statistics
+        R_mean = mean(R);
+        R_median = median(R);
+        R_std = std(R);
+
+        % Create a new figure for the distribution plot
+        figure('Name', 'Resultant Distance Distribution', 'Position', [150 150 800 600]);
+        hold on;
+
+        % Plot histogram
+        histogram(R, 'Normalization', 'probability', 'BinWidth', R_std/2, 'FaceColor', [0.2 0.6 0.8], 'EdgeColor', 'k');
+        
+        % Plot Kernel Density Estimate
+        [f, xi] = ksdensity(R);
+        plot(xi, f, 'LineWidth', 2, 'Color', 'r', 'DisplayName', 'KDE');
+
+        % Plot mean, median, and standard deviation lines
+        yLimits = ylim;
+        plot([R_mean R_mean], yLimits, 'g-', 'LineWidth', 2, 'DisplayName', 'Mean');
+        plot([R_median R_median], yLimits, 'm--', 'LineWidth', 2, 'DisplayName', 'Median');
+        plot([R_mean + R_std R_mean + R_std], yLimits, 'c-.', 'LineWidth', 2, 'DisplayName', 'Mean + 1 Std Dev');
+        plot([R_mean - R_std R_mean - R_std], yLimits, 'c-.', 'LineWidth', 2, 'DisplayName', 'Mean - 1 Std Dev');
+
+        % Annotations
+        legend('show', 'Location', 'best');
+        xlabel('Resultant Distance (m)');
+        ylabel('Probability');
+        title('Distribution of Resultant Distances (Non-Zero Values)');
+        grid on;
+        hold off;
+        drawnow;  % Force immediate rendering
+    end
+
+    %% ------------------ End of Helper Functions ------------------
+end
